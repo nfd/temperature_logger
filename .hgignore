@@ -1,0 +1,12 @@
+syntax: glob
+.dep/*
+*.lst
+Session.vim
+*.o
+logger.eep
+logger.elf
+logger.hex
+logger.lss
+logger.lst
+logger.map
+logger.sym
