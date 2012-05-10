@@ -34,12 +34,23 @@
 
 #include "onewire.h"
 #include "ds18x20.h"
+#include "i2cmaster.h"
 
 //#include "diskio.h"
 //#include "ff.h"
 #include <avr/eeprom.h> 
 
-#define MAXSENSORS 4
+#define MAXSENSORS 2
+
+// Internal EEPROM settings
+//#define EXTERNAL_EEPROM 0
+//#define MAX_EEPROM_LOCATION 1023
+
+// External EEPROM settings
+#define EXTERNAL_EEPROM 1
+#define MAX_EEPROM_LOCATION ((16 * 1024) - 1)
+// Refer to EEPROM documentation.
+#define EXTERNAL_EEPROM_24C 0xA0
 
 uint8_t gSensorIDs[MAXSENSORS][OW_ROMCODE_SIZE];
 
@@ -58,7 +69,6 @@ uint16_t uptime_ms = 0;
 #define START_EEPROM_LOCATION 4
 //for testing
 //#define START_EEPROM_LOCATION 1020
-#define MAX_EEPROM_LOCATION 1023
 #define DEFAULT_SECS_BETWEEN_READS 15
 
 // Read from EEPROM. Stored in EEPROM as:
@@ -99,6 +109,47 @@ USB_ClassInfo_CDC_Device_t VirtualSerial_CDC_Interface =
  *  used like any regular character stream in the C APIs
  */
 FILE USBSerialStream;
+
+#if EXTERNAL_EEPROM == 1
+static uint8_t write_byte(uint8_t *loc, uint8_t val)
+{
+	uint8_t high, low;
+
+	high = ((uintptr_t)loc) >> 8;
+	low  = ((uintptr_t)loc) & 0xff;
+
+	i2c_start_wait(EXTERNAL_EEPROM_24C | I2C_WRITE);
+	i2c_write(high);
+	i2c_write(low);
+	i2c_write(val);
+	i2c_stop();
+
+	return 0;
+}
+
+static uint8_t read_byte(uint8_t *loc, uint8_t *result)
+{
+	uint8_t high, low;
+
+	high = ((uintptr_t)loc) >> 8;
+	low  = ((uintptr_t)loc) & 0xff;
+
+	i2c_start_wait(EXTERNAL_EEPROM_24C | I2C_WRITE);
+	i2c_write(high);
+	i2c_write(low);
+
+	i2c_rep_start(EXTERNAL_EEPROM_24C | I2C_READ);
+	*result = i2c_readNak();
+
+	i2c_stop();
+
+	return 0;
+}
+
+#else /* EXTERNAL_EEPROM == 0 */
+#define write_byte eeprom_write_byte
+#define read_byte(loc, result) *result = eeprom_read_byte(loc)
+#endif
 
 static uint8_t search_sensors(void)
 {
@@ -182,22 +233,32 @@ static void disk_test(void)
 #endif
 
 static void
-show_button_status(void)
+eeprom_test(void)
 {
-	fprintf(&USBSerialStream, "%d\r\n", Buttons_GetStatus());
-}
+	uint8_t byte, res;
 
+	fprintf(&USBSerialStream, "\r\nWrite byte\r\n");
+
+	res = write_byte((void *)10, 0x37);
+
+	fprintf(&USBSerialStream, "R= %d. \r\n", res);
+
+	res = read_byte((void *)10, &byte);
+
+	fprintf(&USBSerialStream, "R= %d, %x\r\n", res, byte);
+}
 
 static void
 showOptions(void)
 {
-	fputs("t    show temperature\r\n", &USBSerialStream);
-	fputs("c    show isr counter\r\n", &USBSerialStream);
-	fputs("h    show eeprom header\r\n", &USBSerialStream);
-	fputs("d    show eeprom data\r\n", &USBSerialStream);
-	fputs("1    data interval: 1 sec\r\n", &USBSerialStream);
-	fputs("5    data interval: 16 secs\r\n", &USBSerialStream);
-	fputs("6    data interval: 32 secs\r\n", &USBSerialStream);
+	fputs("t    temperature\r\n", &USBSerialStream);
+	fputs("c    isr counter\r\n", &USBSerialStream);
+	fputs("h    e header\r\n", &USBSerialStream);
+	fputs("d    e data\r\n", &USBSerialStream);
+	fputs("e    e test\r\n", &USBSerialStream);
+	fputs("1    interval: 1 sec\r\n", &USBSerialStream);
+	fputs("5    interval: 16 secs\r\n", &USBSerialStream);
+	fputs("6    interval: 32 secs\r\n", &USBSerialStream);
 	//fputs("\r\nd    disk test\r\n", &USBSerialStream);
 }
 
@@ -207,19 +268,21 @@ eeprom_read_header(void)
 	uint8_t byte;
 	uint8_t sum;
 
-	byte = sum = eeprom_read_byte((uint8_t *)0);
+	sum = read_byte((uint8_t *)0, &byte);
+	sum = byte;
+
 	ms_between_reads = byte * 1000;
 
-	byte = eeprom_read_byte((uint8_t *)1);
+	read_byte((uint8_t *)1, &byte);
 	e_write_ptr = byte << 8;
 	sum += byte;
 
-	byte = eeprom_read_byte((uint8_t *)2);
+	read_byte((uint8_t *)2, &byte);
 	e_write_ptr |= byte;
 	e_write_ptr += START_EEPROM_LOCATION;
 	sum += byte;
 
-	byte = eeprom_read_byte((uint8_t *)3);
+	read_byte((uint8_t *)3, &byte);
 
 	if(byte != sum) {
 		// Reset to default values
@@ -235,17 +298,17 @@ eeprom_write_header(void)
 	uint8_t sum;
 
 	byte = sum = (ms_between_reads / 1000);
-	eeprom_write_byte((uint8_t *)0, byte);
+	write_byte((uint8_t *)0, byte);
 
 	byte = ((e_write_ptr - START_EEPROM_LOCATION) >> 8);
 	sum += byte;
-	eeprom_write_byte((uint8_t *)1, byte);
+	write_byte((uint8_t *)1, byte);
 
 	byte = ((e_write_ptr - START_EEPROM_LOCATION) & 0xff);
 	sum += byte;
-	eeprom_write_byte((uint8_t *)2, byte);
+	write_byte((uint8_t *)2, byte);
 
-	eeprom_write_byte((uint8_t *)3, sum);
+	write_byte((uint8_t *)3, sum);
 }
 
 static void
@@ -258,14 +321,16 @@ eeprom_update_count(void)
 static void
 show_header(void)
 {
+	eeprom_read_header();
 	fprintf(&USBSerialStream, "Secs: %d; Count: %d\r\n", ms_between_reads / 1000, e_write_ptr - START_EEPROM_LOCATION);
 }
 
 static void
 show_data(void)
 {
-	for(int i = START_EEPROM_LOCATION; i < e_write_ptr; i++) {
-		int8_t byte = (int8_t)eeprom_read_byte((uint8_t *)i);
+	for(unsigned int i = START_EEPROM_LOCATION; i < e_write_ptr; i++) {
+		int8_t byte;
+		read_byte((uint8_t *)i, (uint8_t *)&byte);
 		fprintf(&USBSerialStream, "%d ", byte);
 	}
 	fputs("\r\nDone\r\n", &USBSerialStream);
@@ -297,6 +362,8 @@ doMenu(int byte)
 		show_data();
 	} else if (byte >= '1' && byte <= '9') {
 		set_interval_frommenu(byte);
+	} else if (byte == 'e') {
+		eeprom_test();
 	/*} else if (byte == 'd') {
 		disk_test();
 	*/
@@ -373,11 +440,11 @@ int main(void)
 					int8_t byte;
 
 					if(temperature_result != DS18X20_OK) {
-						byte = 0xff;
+						byte = 127;
 					} else {
 						byte = most_recent_temperature / 10;
 					}
-					eeprom_write_byte((uint8_t*)e_write_ptr, (uint8_t)byte);
+					write_byte((uint8_t*)e_write_ptr, (uint8_t)byte);
 
 					e_write_ptr += 1;
 					last_recording_made = uptime_ms;
@@ -437,6 +504,10 @@ void SetupHardware(void)
 
 	/* Disable clock division */
 	clock_prescale_set(clock_div_1);
+
+#if EXTERNAL_EEPROM == 1
+	i2c_init();
+#endif
 
 	/* Hardware Initialization */
 	LEDs_Init();
